@@ -173,6 +173,7 @@ nv50_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_VERTEX_BUFFER_OFFSET_4BYTE_ALIGNED_ONLY:
    case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
    case PIPE_CAP_VERTEX_ELEMENT_SRC_OFFSET_4BYTE_ALIGNED_ONLY:
+   case PIPE_CAP_TEXTURE_MULTISAMPLE:
       return 0;
    default:
       NOUVEAU_ERR("unknown PIPE_CAP %d\n", param);
@@ -267,7 +268,8 @@ nv50_screen_destroy(struct pipe_screen *pscreen)
    if (screen->base.pushbuf)
       screen->base.pushbuf->user_priv = NULL;
 
-   FREE(screen->blitctx);
+   if (screen->blitter)
+      nv50_blitter_destroy(screen);
 
    nouveau_bo_ref(NULL, &screen->code);
    nouveau_bo_ref(NULL, &screen->tls_bo);
@@ -451,6 +453,18 @@ nv50_screen_init_hwctx(struct nv50_screen *screen)
    PUSH_DATA (push, (NV50_CB_AUX << 12) | 0xf01);
    PUSH_DATA (push, (NV50_CB_AUX << 12) | 0xf21);
    PUSH_DATA (push, (NV50_CB_AUX << 12) | 0xf31);
+
+   /* return { 0.0, 0.0, 0.0, 0.0 } on out-of-bounds vtxbuf access */
+   BEGIN_NV04(push, NV50_3D(CB_ADDR), 1);
+   PUSH_DATA (push, ((1 << 9) << 6) | NV50_CB_AUX);
+   BEGIN_NI04(push, NV50_3D(CB_DATA(0)), 4);
+   PUSH_DATAf(push, 0.0f);
+   PUSH_DATAf(push, 0.0f);
+   PUSH_DATAf(push, 0.0f);
+   PUSH_DATAf(push, 0.0f);
+   BEGIN_NV04(push, NV50_3D(VERTEX_RUNOUT_ADDRESS_HIGH), 2);
+   PUSH_DATAh(push, screen->uniforms->offset + (3 << 16) + (1 << 9));
+   PUSH_DATA (push, screen->uniforms->offset + (3 << 16) + (1 << 9));
 
    /* max TIC (bits 4:8) & TSC bindings, per program type */
    for (i = 0; i < 3; ++i) {
@@ -749,7 +763,7 @@ nv50_screen_create(struct nouveau_device *dev)
    screen->tic.entries = CALLOC(4096, sizeof(void *));
    screen->tsc.entries = screen->tic.entries + 2048;
 
-   if (!nv50_blitctx_create(screen))
+   if (!nv50_blitter_create(screen))
       goto fail;
 
    nv50_screen_init_hwctx(screen);

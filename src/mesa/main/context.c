@@ -404,9 +404,6 @@ one_time_init( struct gl_context *ctx )
 
       _mesa_get_cpu_features();
 
-      /* context dependence is never a one-time thing... */
-      _mesa_init_get_hash(ctx);
-
       for (i = 0; i < 256; i++) {
          _mesa_ubyte_to_float_color_tab[i] = (float) i / 255.0F;
       }
@@ -425,6 +422,8 @@ one_time_init( struct gl_context *ctx )
 
    /* per-API one-time init */
    if (!(api_init_mask & (1 << ctx->API))) {
+      _mesa_init_get_hash(ctx);
+
       /*
        * This is fine as ES does not use the remap table, but it may not be
        * future-proof.  We cannot always initialize the remap table because
@@ -797,8 +796,8 @@ init_attrib_groups(struct gl_context *ctx)
    /* Miscellaneous */
    ctx->NewState = _NEW_ALL;
    ctx->NewDriverState = ~0;
-   ctx->ErrorValue = (GLenum) GL_NO_ERROR;
-   ctx->ResetStatus = (GLenum) GL_NO_ERROR;
+   ctx->ErrorValue = GL_NO_ERROR;
+   ctx->ResetStatus = GL_NO_ERROR;
    ctx->varying_vp_inputs = VERT_BIT_ALL;
 
    return GL_TRUE;
@@ -832,8 +831,8 @@ update_default_objects(struct gl_context *ctx)
  * This helps prevents a segfault when someone calls a GL function without
  * first checking if the extension's supported.
  */
-static int
-generic_nop(void)
+int
+_mesa_generic_nop(void)
 {
    GET_CURRENT_CONTEXT(ctx);
    _mesa_error(ctx, GL_INVALID_OPERATION,
@@ -865,7 +864,7 @@ _mesa_alloc_dispatch_table(int size)
       _glapi_proc *entry = (_glapi_proc *) table;
       GLint i;
       for (i = 0; i < numEntries; i++) {
-         entry[i] = (_glapi_proc) generic_nop;
+         entry[i] = (_glapi_proc) _mesa_generic_nop;
       }
    }
    return table;
@@ -897,20 +896,17 @@ _mesa_alloc_dispatch_table(int size)
  *        etc with, or NULL
  * \param driverFunctions table of device driver functions for this context
  *        to use
- * \param driverContext pointer to driver-specific context data
  */
 GLboolean
 _mesa_initialize_context(struct gl_context *ctx,
                          gl_api api,
                          const struct gl_config *visual,
                          struct gl_context *share_list,
-                         const struct dd_function_table *driverFunctions,
-                         void *driverContext)
+                         const struct dd_function_table *driverFunctions)
 {
    struct gl_shared_state *shared;
    int i;
 
-   /*ASSERT(driverContext);*/
    assert(driverFunctions->NewTextureObject);
    assert(driverFunctions->FreeTextureImageBuffer);
 
@@ -921,6 +917,10 @@ _mesa_initialize_context(struct gl_context *ctx,
    ctx->WinSysDrawBuffer = NULL;
    ctx->WinSysReadBuffer = NULL;
 
+   if (_mesa_is_desktop_gl(ctx)) {
+      _mesa_override_gl_version(ctx);
+   }
+
    /* misc one-time initializations */
    one_time_init(ctx);
 
@@ -930,7 +930,6 @@ _mesa_initialize_context(struct gl_context *ctx,
     * textures.
     */
    ctx->Driver = *driverFunctions;
-   ctx->DriverCtx = driverContext;
 
    if (share_list) {
       /* share state with another context */
@@ -995,7 +994,7 @@ _mesa_initialize_context(struct gl_context *ctx,
 
    switch (ctx->API) {
    case API_OPENGL:
-      ctx->Save = _mesa_create_save_table();
+      ctx->Save = _mesa_create_save_table(ctx);
       if (!ctx->Save) {
          _mesa_reference_shared_state(ctx, &ctx->Shared, NULL);
 	 free(ctx->Exec);
@@ -1003,6 +1002,7 @@ _mesa_initialize_context(struct gl_context *ctx,
       }
 
       _mesa_install_save_vtxfmt( ctx, &ctx->ListState.ListVtxfmt );
+      /* fall-through */
    case API_OPENGL_CORE:
       break;
    case API_OPENGLES:
@@ -1044,7 +1044,6 @@ _mesa_initialize_context(struct gl_context *ctx,
  * \param share_list another context to share display lists with or NULL
  * \param driverFunctions points to the dd_function_table into which the
  *        driver has plugged in all its special functions.
- * \param driverContext points to the device driver's private context state
  * 
  * \return pointer to a new __struct gl_contextRec or NULL if error.
  */
@@ -1052,20 +1051,18 @@ struct gl_context *
 _mesa_create_context(gl_api api,
                      const struct gl_config *visual,
                      struct gl_context *share_list,
-                     const struct dd_function_table *driverFunctions,
-                     void *driverContext)
+                     const struct dd_function_table *driverFunctions)
 {
    struct gl_context *ctx;
 
    ASSERT(visual);
-   /*ASSERT(driverContext);*/
 
    ctx = calloc(1, sizeof(struct gl_context));
    if (!ctx)
       return NULL;
 
    if (_mesa_initialize_context(ctx, api, visual, share_list,
-                                driverFunctions, driverContext)) {
+                                driverFunctions)) {
       return ctx;
    }
    else {

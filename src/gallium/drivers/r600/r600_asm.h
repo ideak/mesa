@@ -25,7 +25,6 @@
 
 #include "r600.h"
 
-struct r600_vertex_element;
 struct r600_context;
 
 struct r600_bytecode_alu_src {
@@ -233,13 +232,17 @@ int r600_bytecode_add_cfinst(struct r600_bytecode *bc, int inst);
 int r600_bytecode_add_alu_type(struct r600_bytecode *bc, const struct r600_bytecode_alu *alu, int type);
 void r600_bytecode_special_constants(uint32_t value, unsigned *sel, unsigned *neg);
 void r600_bytecode_dump(struct r600_bytecode *bc);
+void r600_bytecode_alu_read(struct r600_bytecode_alu *alu, uint32_t word0, uint32_t word1);
 
 int cm_bytecode_add_cf_end(struct r600_bytecode *bc);
 
-int r600_vertex_elements_build_fetch_shader(struct r600_context *rctx, struct r600_vertex_element *ve);
+void *r600_create_vertex_fetch_shader(struct pipe_context *ctx,
+				      unsigned count,
+				      const struct pipe_vertex_element *elements);
 
 /* r700_asm.c */
 void r700_bytecode_cf_vtx_build(uint32_t *bytecode, const struct r600_bytecode_cf *cf);
 int r700_bytecode_alu_build(struct r600_bytecode *bc, struct r600_bytecode_alu *alu, unsigned id);
+void r700_bytecode_alu_read(struct r600_bytecode_alu *alu, uint32_t word0, uint32_t word1);
 
 #endif

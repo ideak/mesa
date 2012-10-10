@@ -151,6 +151,7 @@ nvc0_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_VERTEX_BUFFER_OFFSET_4BYTE_ALIGNED_ONLY:
    case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
    case PIPE_CAP_VERTEX_ELEMENT_SRC_OFFSET_4BYTE_ALIGNED_ONLY:
+   case PIPE_CAP_TEXTURE_MULTISAMPLE:
       return 0;
    default:
       NOUVEAU_ERR("unknown PIPE_CAP %d\n", param);
@@ -256,7 +257,8 @@ nvc0_screen_destroy(struct pipe_screen *pscreen)
    if (screen->base.pushbuf)
       screen->base.pushbuf->user_priv = NULL;
 
-   FREE(screen->blitctx);
+   if (screen->blitter)
+      nvc0_blitter_destroy(screen);
 
    nouveau_bo_ref(NULL, &screen->text);
    nouveau_bo_ref(NULL, &screen->uniform_bo);
@@ -587,7 +589,7 @@ nvc0_screen_create(struct nouveau_device *dev)
 
    for (i = 0; i < 5; ++i) {
       /* TIC and TSC entries for each unit (nve4+ only) */
-      /* auxiliary constants (6 user clip planes, base instance id */
+      /* auxiliary constants (6 user clip planes, base instance id) */
       BEGIN_NVC0(push, NVC0_3D(CB_SIZE), 3);
       PUSH_DATA (push, 512);
       PUSH_DATAh(push, screen->uniform_bo->offset + (5 << 16) + (i << 9));
@@ -607,6 +609,21 @@ nvc0_screen_create(struct nouveau_device *dev)
    }
    BEGIN_NVC0(push, NVC0_3D(LINKED_TSC), 1);
    PUSH_DATA (push, 0);
+
+   /* return { 0.0, 0.0, 0.0, 0.0 } for out-of-bounds vtxbuf access */
+   BEGIN_NVC0(push, NVC0_3D(CB_SIZE), 3);
+   PUSH_DATA (push, 256);
+   PUSH_DATAh(push, screen->uniform_bo->offset + (5 << 16) + (6 << 9));
+   PUSH_DATA (push, screen->uniform_bo->offset + (5 << 16) + (6 << 9));
+   BEGIN_1IC0(push, NVC0_3D(CB_POS), 5);
+   PUSH_DATA (push, 0);
+   PUSH_DATAf(push, 0.0f);
+   PUSH_DATAf(push, 0.0f);
+   PUSH_DATAf(push, 0.0f);
+   PUSH_DATAf(push, 0.0f);
+   BEGIN_NVC0(push, NVC0_3D(VERTEX_RUNOUT_ADDRESS_HIGH), 2);
+   PUSH_DATAh(push, screen->uniform_bo->offset + (5 << 16) + (6 << 9));
+   PUSH_DATA (push, screen->uniform_bo->offset + (5 << 16) + (6 << 9));
 
    /* max MPs * max warps per MP (TODO: ask kernel) */
    if (screen->eng3d->oclass >= NVE4_3D_CLASS)
@@ -732,10 +749,6 @@ nvc0_screen_create(struct nouveau_device *dev)
 
    IMMED_NVC0(push, NVC0_3D(EDGEFLAG), 1);
 
-   BEGIN_NVC0(push, NVC0_3D(VERTEX_RUNOUT_ADDRESS_HIGH), 2);
-   PUSH_DATA (push, 0xab);
-   PUSH_DATA (push, 0x00000000);
-
    PUSH_KICK (push);
 
    screen->tic.entries = CALLOC(4096, sizeof(void *));
@@ -745,7 +758,7 @@ nvc0_screen_create(struct nouveau_device *dev)
    mm_config.nvc0.memtype = 0xfe0;
    screen->mm_VRAM_fe0 = nouveau_mm_create(dev, NOUVEAU_BO_VRAM, &mm_config);
 
-   if (!nvc0_blitctx_create(screen))
+   if (!nvc0_blitter_create(screen))
       goto fail;
 
    nouveau_fence_new(&screen->base, &screen->base.fence.current, FALSE);

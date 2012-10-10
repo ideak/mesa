@@ -33,6 +33,7 @@
 
 #include "r300_defines.h"
 #include "r300_screen.h"
+#include "compiler/radeon_regalloc.h"
 #include "../../winsys/radeon/drm/radeon_winsys.h"
 
 struct u_upload_mgr;
@@ -622,6 +623,10 @@ struct r300_context {
     boolean hiz_in_use;         /* Whether HIZ is enabled. */
     enum r300_hiz_func hiz_func; /* HiZ function. Can be either MIN or MAX. */
     uint32_t hiz_clear_value;   /* HiZ clear value. */
+
+    /* Compiler state. */
+    struct rc_regalloc_state fs_regalloc_state; /* Register allocator info for
+                                                 * fragment shaders. */
 };
 
 #define foreach_atom(r300, atom) \
@@ -717,8 +722,7 @@ void r300_plug_in_stencil_ref_fallback(struct r300_context *r300);
 void r300_draw_flush_vbuf(struct r300_context *r300);
 void r500_emit_index_bias(struct r300_context *r300, int index_bias);
 void r300_blitter_draw_rectangle(struct blitter_context *blitter,
-                                 unsigned x1, unsigned y1,
-                                 unsigned x2, unsigned y2,
+                                 int x1, int y1, int x2, int y2,
                                  float depth,
                                  enum blitter_attrib_type type,
                                  const union pipe_color_union *attrib);

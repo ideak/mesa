@@ -28,17 +28,6 @@ extern "C" {
 #include "main/enums.h"
 }
 
-/* Stub this out because the real Mesa implementation is tied into a
- * bunch of the GL_ARB_debug infrastructure.  This results in pulling
- * in most of libmesa.a and a cacade of missing symbols, etc.
- */
-extern "C" void
-_mesa_warning( struct gl_context *ctx, const char *fmtString, ... )
-{
-   (void) ctx;
-   (void) fmtString;
-}
-
 struct enum_info {
    int value;
    const char *name;
@@ -563,7 +552,7 @@ const struct enum_info everything[] = {
    { 0x8036, "GL_UNSIGNED_INT_10_10_10_2" },
    { 0x8037, "GL_POLYGON_OFFSET_FILL" },
    { 0x8038, "GL_POLYGON_OFFSET_FACTOR" },
-   { 0x8039, "GL_POLYGON_OFFSET_BIAS" },
+   { 0x8039, "GL_POLYGON_OFFSET_BIAS_EXT" },
    { 0x803A, "GL_RESCALE_NORMAL" },
    { 0x803B, "GL_ALPHA4" },
    { 0x803C, "GL_ALPHA8" },
@@ -835,8 +824,8 @@ const struct enum_info everything[] = {
    { 0x83A3, "GL_RGBA4_S3TC" },
    { 0x83F0, "GL_COMPRESSED_RGB_S3TC_DXT1_EXT" },
    { 0x83F1, "GL_COMPRESSED_RGBA_S3TC_DXT1_EXT" },
-   { 0x83F2, "GL_COMPRESSED_RGBA_S3TC_DXT3_EXT" },
-   { 0x83F3, "GL_COMPRESSED_RGBA_S3TC_DXT5_EXT" },
+   { 0x83F2, "GL_COMPRESSED_RGBA_S3TC_DXT3_ANGLE" },
+   { 0x83F3, "GL_COMPRESSED_RGBA_S3TC_DXT5_ANGLE" },
    { 0x844D, "GL_NEAREST_CLIPMAP_NEAREST_SGIX" },
    { 0x844E, "GL_NEAREST_CLIPMAP_LINEAR_SGIX" },
    { 0x844F, "GL_LINEAR_CLIPMAP_NEAREST_SGIX" },

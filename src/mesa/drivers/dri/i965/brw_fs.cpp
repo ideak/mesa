@@ -1249,168 +1249,6 @@ fs_visitor::setup_pull_constants()
    c->prog_data.nr_pull_params = pull_uniform_count;
 }
 
-/**
- * Attempts to move immediate constants into the immediate
- * constant slot of following instructions.
- *
- * Immediate constants are a bit tricky -- they have to be in the last
- * operand slot, you can't do abs/negate on them,
- */
-
-bool
-fs_visitor::propagate_constants()
-{
-   bool progress = false;
-
-   calculate_live_intervals();
-
-   foreach_list(node, &this->instructions) {
-      fs_inst *inst = (fs_inst *)node;
-
-      if (inst->opcode != BRW_OPCODE_MOV ||
-	  inst->predicated ||
-	  inst->dst.file != GRF || inst->src[0].file != IMM ||
-	  inst->dst.type != inst->src[0].type ||
-	  (c->dispatch_width == 16 &&
-	   (inst->force_uncompressed || inst->force_sechalf)))
-	 continue;
-
-      /* Don't bother with cases where we should have had the
-       * operation on the constant folded in GLSL already.
-       */
-      if (inst->saturate)
-	 continue;
-
-      /* Found a move of a constant to a GRF.  Find anything else using the GRF
-       * before it's written, and replace it with the constant if we can.
-       */
-      for (fs_inst *scan_inst = (fs_inst *)inst->next;
-	   !scan_inst->is_tail_sentinel();
-	   scan_inst = (fs_inst *)scan_inst->next) {
-	 if (scan_inst->opcode == BRW_OPCODE_DO ||
-	     scan_inst->opcode == BRW_OPCODE_WHILE ||
-	     scan_inst->opcode == BRW_OPCODE_ELSE ||
-	     scan_inst->opcode == BRW_OPCODE_ENDIF) {
-	    break;
-	 }
-
-	 for (int i = 2; i >= 0; i--) {
-	    if (scan_inst->src[i].file != GRF ||
-		scan_inst->src[i].reg != inst->dst.reg ||
-		scan_inst->src[i].reg_offset != inst->dst.reg_offset)
-	       continue;
-
-	    /* Don't bother with cases where we should have had the
-	     * operation on the constant folded in GLSL already.
-	     */
-	    if (scan_inst->src[i].negate || scan_inst->src[i].abs)
-	       continue;
-
-	    switch (scan_inst->opcode) {
-	    case BRW_OPCODE_MOV:
-	       scan_inst->src[i] = inst->src[0];
-	       progress = true;
-	       break;
-
-	    case BRW_OPCODE_MUL:
-	    case BRW_OPCODE_ADD:
-	       if (i == 1) {
-		  scan_inst->src[i] = inst->src[0];
-		  progress = true;
-	       } else if (i == 0 && scan_inst->src[1].file != IMM) {
-		  /* Fit this constant in by commuting the operands.
-		   * Exception: we can't do this for 32-bit integer MUL
-		   * because it's asymmetric.
-		   */
-		  if (scan_inst->opcode == BRW_OPCODE_MUL &&
-		      (scan_inst->src[1].type == BRW_REGISTER_TYPE_D ||
-		       scan_inst->src[1].type == BRW_REGISTER_TYPE_UD))
-		     break;
-		  scan_inst->src[0] = scan_inst->src[1];
-		  scan_inst->src[1] = inst->src[0];
-		  progress = true;
-	       }
-	       break;
-
-	    case BRW_OPCODE_CMP:
-	    case BRW_OPCODE_IF:
-	       if (i == 1) {
-		  scan_inst->src[i] = inst->src[0];
-		  progress = true;
-	       } else if (i == 0 && scan_inst->src[1].file != IMM) {
-		  uint32_t new_cmod;
-
-		  new_cmod = brw_swap_cmod(scan_inst->conditional_mod);
-		  if (new_cmod != ~0u) {
-		     /* Fit this constant in by swapping the operands and
-		      * flipping the test
-		      */
-		     scan_inst->src[0] = scan_inst->src[1];
-		     scan_inst->src[1] = inst->src[0];
-		     scan_inst->conditional_mod = new_cmod;
-		     progress = true;
-		  }
-	       }
-	       break;
-
-	    case BRW_OPCODE_SEL:
-	       if (i == 1) {
-		  scan_inst->src[i] = inst->src[0];
-		  progress = true;
-	       } else if (i == 0 && scan_inst->src[1].file != IMM) {
-		  scan_inst->src[0] = scan_inst->src[1];
-		  scan_inst->src[1] = inst->src[0];
-
-		  /* If this was predicated, flipping operands means
-		   * we also need to flip the predicate.
-		   */
-		  if (scan_inst->conditional_mod == BRW_CONDITIONAL_NONE) {
-		     scan_inst->predicate_inverse =
-			!scan_inst->predicate_inverse;
-		  }
-		  progress = true;
-	       }
-	       break;
-
-	    case SHADER_OPCODE_RCP:
-	       /* The hardware doesn't do math on immediate values
-		* (because why are you doing that, seriously?), but
-		* the correct answer is to just constant fold it
-		* anyway.
-		*/
-	       assert(i == 0);
-	       if (inst->src[0].imm.f != 0.0f) {
-		  scan_inst->opcode = BRW_OPCODE_MOV;
-		  scan_inst->src[0] = inst->src[0];
-		  scan_inst->src[0].imm.f = 1.0f / scan_inst->src[0].imm.f;
-		  progress = true;
-	       }
-	       break;
-
-            case FS_OPCODE_PULL_CONSTANT_LOAD:
-	       scan_inst->src[i] = inst->src[0];
-	       progress = true;
-	       break;
-
-	    default:
-	       break;
-	    }
-	 }
-
-	 if (scan_inst->dst.file == GRF &&
-             scan_inst->overwrites_reg(inst->dst)) {
-	    break;
-	 }
-      }
-   }
-
-   if (progress)
-       this->live_intervals_valid = false;
-
-   return progress;
-}
-
-
 bool
 fs_visitor::opt_algebraic()
 {
@@ -1435,7 +1273,30 @@ fs_visitor::opt_algebraic()
 	    break;
 	 }
 
+         /* a * 0.0 = 0.0 */
+         if (inst->src[1].type == BRW_REGISTER_TYPE_F &&
+             inst->src[1].imm.f == 0.0) {
+            inst->opcode = BRW_OPCODE_MOV;
+            inst->src[0] = fs_reg(0.0f);
+            inst->src[1] = reg_undef;
+            progress = true;
+            break;
+         }
+
 	 break;
+      case BRW_OPCODE_ADD:
+         if (inst->src[1].file != IMM)
+            continue;
+
+         /* a + 0.0 = a */
+         if (inst->src[1].type == BRW_REGISTER_TYPE_F &&
+             inst->src[1].imm.f == 0.0) {
+            inst->opcode = BRW_OPCODE_MOV;
+            inst->src[1] = reg_undef;
+            progress = true;
+            break;
+         }
+         break;
       default:
 	 break;
       }
@@ -1976,11 +1837,15 @@ fs_visitor::run()
       /* Generate FS IR for main().  (the visitor only descends into
        * functions called "main").
        */
-      foreach_list(node, &*shader->ir) {
-	 ir_instruction *ir = (ir_instruction *)node;
-	 base_ir = ir;
-	 this->result = reg_undef;
-	 ir->accept(this);
+      if (shader) {
+         foreach_list(node, &*shader->ir) {
+            ir_instruction *ir = (ir_instruction *)node;
+            base_ir = ir;
+            this->result = reg_undef;
+            ir->accept(this);
+         }
+      } else {
+         emit_fragment_program_code();
       }
       if (failed)
 	 return false;
@@ -1998,7 +1863,6 @@ fs_visitor::run()
 
 	 progress = remove_duplicate_mrf_writes() || progress;
 
-	 progress = propagate_constants() || progress;
 	 progress = opt_algebraic() || progress;
 	 progress = opt_cse() || progress;
 	 progress = opt_copy_propagate() || progress;
@@ -2061,24 +1925,26 @@ brw_wm_fs_emit(struct brw_context *brw, struct brw_wm_compile *c,
    bool start_busy = false;
    float start_time = 0;
 
-   if (!prog)
-      return false;
-
    if (unlikely(INTEL_DEBUG & DEBUG_PERF)) {
       start_busy = (intel->batch.last_bo &&
                     drm_intel_bo_busy(intel->batch.last_bo));
       start_time = get_time();
    }
 
-   struct brw_shader *shader =
-     (brw_shader *) prog->_LinkedShaders[MESA_SHADER_FRAGMENT];
-   if (!shader)
-      return false;
+   struct brw_shader *shader = NULL;
+   if (prog)
+      shader = (brw_shader *) prog->_LinkedShaders[MESA_SHADER_FRAGMENT];
 
    if (unlikely(INTEL_DEBUG & DEBUG_WM)) {
-      printf("GLSL IR for native fragment shader %d:\n", prog->Name);
-      _mesa_print_ir(shader->ir, NULL);
-      printf("\n\n");
+      if (shader) {
+         printf("GLSL IR for native fragment shader %d:\n", prog->Name);
+         _mesa_print_ir(shader->ir, NULL);
+         printf("\n\n");
+      } else {
+         printf("ARB_fragment_program %d ir for native fragment shader\n",
+                c->fp->program.Base.Id);
+         _mesa_print_program(&c->fp->program.Base);
+      }
    }
 
    /* Now the main event: Visit the shader IR and generate our FS IR for it.

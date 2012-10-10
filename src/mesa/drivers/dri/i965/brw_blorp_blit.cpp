@@ -180,8 +180,11 @@ formats_match(GLbitfield buffer_bit, struct intel_renderbuffer *src_irb,
     * example MESA_FORMAT_X8_Z24 and MESA_FORMAT_S8_Z24), and we can blit
     * between those formats.
     */
-   return find_miptree(buffer_bit, src_irb)->format ==
-      find_miptree(buffer_bit, dst_irb)->format;
+   gl_format src_format = find_miptree(buffer_bit, src_irb)->format;
+   gl_format dst_format = find_miptree(buffer_bit, dst_irb)->format;
+
+   return _mesa_get_srgb_format_linear(src_format) ==
+          _mesa_get_srgb_format_linear(dst_format);
 }
 
 
@@ -1638,6 +1641,19 @@ brw_blorp_blit_params::brw_blorp_blit_params(struct brw_context *brw,
    src.set(brw, src_mt, src_level, src_layer);
    dst.set(brw, dst_mt, dst_level, dst_layer);
 
+   /* If we are blitting from sRGB to linear or vice versa, we still want the
+    * blit to be a direct copy, so we need source and destination to use the
+    * same format.  However, we want the destination sRGB/linear state to be
+    * correct (so that sRGB blending is used when doing an MSAA resolve to an
+    * sRGB surface, and linear blending is used when doing an MSAA resolve to
+    * a linear surface).  Since blorp blits don't support any format
+    * conversion (except between sRGB and linear), we can accomplish this by
+    * simply setting up the source to use the same format as the destination.
+    */
+   assert(_mesa_get_srgb_format_linear(src_mt->format) ==
+          _mesa_get_srgb_format_linear(dst_mt->format));
+   src.brw_surfaceformat = dst.brw_surfaceformat;
+
    use_wm_prog = true;
    memset(&wm_prog_key, 0, sizeof(wm_prog_key));
 
@@ -1797,6 +1813,11 @@ brw_blorp_blit_params::brw_blorp_blit_params(struct brw_context *brw,
        * account for the differences in aspect ratio between the Y and W
        * sub-tiles.  We need to modify the layer width and height similarly.
        *
+       * A correction needs to be applied when MSAA is in use: since
+       * INTEL_MSAA_LAYOUT_IMS uses an interleaving pattern whose height is 4,
+       * we need to align the Y coordinates to multiples of 8, so that when
+       * they are divided by two they are still multiples of 4.
+       *
        * Note: Since the x/y offset of the surface will be applied using the
        * SURFACE_STATE command packet, it will be invisible to the swizzling
        * code in the shader; therefore it needs to be in a multiple of the
@@ -1818,7 +1839,7 @@ brw_blorp_blit_params::brw_blorp_blit_params(struct brw_context *brw,
        * TODO: what if this makes the coordinates (or the texture size) too
        * large?
        */
-      const unsigned x_align = 8, y_align = 4;
+      const unsigned x_align = 8, y_align = dst.num_samples != 0 ? 8 : 4;
       x0 = ROUND_DOWN_TO(x0, x_align) * 2;
       y0 = ROUND_DOWN_TO(y0, y_align) / 2;
       x1 = ALIGN(x1, x_align) * 2;
@@ -1840,7 +1861,7 @@ brw_blorp_blit_params::brw_blorp_blit_params(struct brw_context *brw,
        *
        * TODO: what if this makes the texture size too large?
        */
-      const unsigned x_align = 8, y_align = 4;
+      const unsigned x_align = 8, y_align = src.num_samples != 0 ? 8 : 4;
       src.width = ALIGN(src.width, x_align) * 2;
       src.height = ALIGN(src.height, y_align) / 2;
       src.x_offset *= 2;

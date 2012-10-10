@@ -2946,6 +2946,7 @@ struct gl_extensions
    GLboolean dummy;  /* don't remove this! */
    GLboolean dummy_true;  /* Set true by _mesa_init_extensions(). */
    GLboolean dummy_false; /* Set false by _mesa_init_extensions(). */
+   GLboolean ANGLE_texture_compression_dxt;
    GLboolean ARB_ES2_compatibility;
    GLboolean ARB_base_instance;
    GLboolean ARB_blend_func_extended;
@@ -3401,8 +3402,6 @@ struct gl_context
     * Device driver function pointer table
     */
    struct dd_function_table Driver;
-
-   void *DriverCtx;	/**< Points to device driver context/state */
 
    /** Core/Driver constants */
    struct gl_constants Const;

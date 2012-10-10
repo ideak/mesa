@@ -110,6 +110,7 @@
 #define PKT3_SURFACE_BASE_UPDATE               0x73
 #define		SURFACE_BASE_UPDATE_DEPTH      (1 << 0)
 #define		SURFACE_BASE_UPDATE_COLOR(x)   (2 << (x))
+#define		SURFACE_BASE_UPDATE_COLOR_NUM(x) (((1 << x) - 1) << 1)
 #define		SURFACE_BASE_UPDATE_STRMOUT(x) (0x200 << (x))
 
 #define EVENT_TYPE_PS_PARTIAL_FLUSH            0x10
@@ -118,6 +119,7 @@
 #define EVENT_TYPE_CACHE_FLUSH_AND_INV_EVENT   0x16
 #define EVENT_TYPE_SO_VGTSTREAMOUT_FLUSH	0x1f
 #define EVENT_TYPE_SAMPLE_STREAMOUTSTATS	0x20
+#define EVENT_TYPE_FLUSH_AND_INV_CB_META	46 /* supported on r700+ */
 #define		EVENT_TYPE(x)                           ((x) << 0)
 #define		EVENT_INDEX(x)                          ((x) << 8)
                 /* 0 - any non-TS event

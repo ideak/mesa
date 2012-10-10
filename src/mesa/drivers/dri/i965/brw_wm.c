@@ -39,92 +39,6 @@
 
 #include "glsl/ralloc.h"
 
-/** Return number of src args for given instruction */
-GLuint brw_wm_nr_args( GLuint opcode )
-{
-   switch (opcode) {
-   case WM_FRONTFACING:
-   case WM_PIXELXY:
-      return 0;
-   case WM_CINTERP:
-   case WM_WPOSXY:
-   case WM_DELTAXY:
-      return 1;
-   case WM_LINTERP:
-   case WM_PIXELW:
-      return 2;
-   case WM_FB_WRITE:
-   case WM_PINTERP:
-      return 3;
-   default:
-      assert(opcode < MAX_OPCODE);
-      return _mesa_num_inst_src_regs(opcode);
-   }
-}
-
-
-GLuint brw_wm_is_scalar_result( GLuint opcode )
-{
-   switch (opcode) {
-   case OPCODE_COS:
-   case OPCODE_EX2:
-   case OPCODE_LG2:
-   case OPCODE_POW:
-   case OPCODE_RCP:
-   case OPCODE_RSQ:
-   case OPCODE_SIN:
-   case OPCODE_DP2:
-   case OPCODE_DP3:
-   case OPCODE_DP4:
-   case OPCODE_DPH:
-   case OPCODE_DST:
-      return 1;
-      
-   default:
-      return 0;
-   }
-}
-
-
-/**
- * Do GPU code generation for non-GLSL shader.  non-GLSL shaders have
- * no flow control instructions so we can more readily do SSA-style
- * optimizations.
- */
-static void
-brw_wm_non_glsl_emit(struct brw_context *brw, struct brw_wm_compile *c)
-{
-   /* Augment fragment program.  Add instructions for pre- and
-    * post-fragment-program tasks such as interpolation and fogging.
-    */
-   brw_wm_pass_fp(c);
-
-   /* Translate to intermediate representation.  Build register usage
-    * chains.
-    */
-   brw_wm_pass0(c);
-
-   /* Dead code removal.
-    */
-   brw_wm_pass1(c);
-
-   /* Register allocation.
-    * Divide by two because we operate on 16 pixels at a time and require
-    * two GRF entries for each logical shader register.
-    */
-   c->grf_limit = BRW_WM_MAX_GRF / 2;
-
-   brw_wm_pass2(c);
-
-   /* how many general-purpose registers are used */
-   c->prog_data.reg_blocks = brw_register_blocks(c->max_wm_grf);
-
-   /* Emit GEN4 code.
-    */
-   brw_wm_emit(c);
-}
-
-
 /**
  * Return a bitfield where bit n is set if barycentric interpolation mode n
  * (see enum brw_wm_barycentric_interp_mode) is needed by the fragment shader.
@@ -313,15 +227,7 @@ bool do_wm_prog(struct brw_context *brw,
          return false;
       }
    } else {
-      void *instruction = c->instruction;
-      void *prog_instructions = c->prog_instructions;
-      void *vreg = c->vreg;
-      void *refs = c->refs;
       memset(c, 0, sizeof(*brw->wm.compile_data));
-      c->instruction = instruction;
-      c->prog_instructions = prog_instructions;
-      c->vreg = vreg;
-      c->refs = refs;
    }
 
    /* Allocate the references to the uniforms that will end up in the
@@ -348,7 +254,6 @@ bool do_wm_prog(struct brw_context *brw,
    memcpy(&c->key, key, sizeof(*key));
 
    c->fp = fp;
-   c->env_param = brw->intel.ctx.FragmentProgram.Parameters;
 
    brw_init_compile(brw, &c->func, c);
 
@@ -356,23 +261,7 @@ bool do_wm_prog(struct brw_context *brw,
       brw_compute_barycentric_interp_modes(brw, c->key.flat_shade,
                                            &fp->program);
 
-   if (prog && prog->_LinkedShaders[MESA_SHADER_FRAGMENT]) {
-      if (!brw_wm_fs_emit(brw, c, prog))
-	 return false;
-   } else {
-      if (!c->instruction) {
-	 c->instruction = rzalloc_array(c, struct brw_wm_instruction, BRW_WM_MAX_INSN);
-	 c->prog_instructions = rzalloc_array(c, struct prog_instruction, BRW_WM_MAX_INSN);
-	 c->vreg = rzalloc_array(c, struct brw_wm_value, BRW_WM_MAX_VREG);
-	 c->refs = rzalloc_array(c, struct brw_wm_ref, BRW_WM_MAX_REF);
-      }
-
-      /* Fallback for fixed function and ARB_fp shaders. */
-      c->dispatch_width = 16;
-      brw_wm_payload_setup(brw, c);
-      brw_wm_non_glsl_emit(brw, c);
-      c->prog_data.dispatch_width = 16;
-   }
+   brw_wm_fs_emit(brw, c, prog);
 
    /* Scratch space is used for register spilling */
    if (c->last_scratch) {
@@ -491,6 +380,8 @@ brw_populate_sampler_prog_key_data(struct gl_context *ctx,
 				   const struct gl_program *prog,
 				   struct brw_sampler_prog_key_data *key)
 {
+   struct intel_context *intel = intel_context(ctx);
+
    for (int s = 0; s < MAX_SAMPLERS; s++) {
       key->swizzles[s] = SWIZZLE_NOOP;
 
@@ -504,61 +395,22 @@ brw_populate_sampler_prog_key_data(struct gl_context *ctx,
 	 const struct gl_texture_object *t = unit->_Current;
 	 const struct gl_texture_image *img = t->Image[0][t->BaseLevel];
 	 struct gl_sampler_object *sampler = _mesa_get_samplerobj(ctx, unit_id);
-	 int swizzles[SWIZZLE_NIL + 1] = {
-	    SWIZZLE_X,
-	    SWIZZLE_Y,
-	    SWIZZLE_Z,
-	    SWIZZLE_W,
-	    SWIZZLE_ZERO,
-	    SWIZZLE_ONE,
-	    SWIZZLE_NIL
-	 };
 
-	 if (img->_BaseFormat == GL_DEPTH_COMPONENT ||
-	     img->_BaseFormat == GL_DEPTH_STENCIL) {
-	    /* We handle GL_DEPTH_TEXTURE_MODE here instead of as surface
-	     * format overrides because shadow comparison always returns the
-	     * result of the comparison in all channels anyway.
-	     */
-	    switch (t->DepthMode) {
-	    case GL_ALPHA:
-	       swizzles[0] = SWIZZLE_ZERO;
-	       swizzles[1] = SWIZZLE_ZERO;
-	       swizzles[2] = SWIZZLE_ZERO;
-	       swizzles[3] = SWIZZLE_X;
-	       break;
-	    case GL_LUMINANCE:
-	       swizzles[0] = SWIZZLE_X;
-	       swizzles[1] = SWIZZLE_X;
-	       swizzles[2] = SWIZZLE_X;
-	       swizzles[3] = SWIZZLE_ONE;
-	       break;
-	    case GL_INTENSITY:
-	       swizzles[0] = SWIZZLE_X;
-	       swizzles[1] = SWIZZLE_X;
-	       swizzles[2] = SWIZZLE_X;
-	       swizzles[3] = SWIZZLE_X;
-	       break;
-	    case GL_RED:
-	       swizzles[0] = SWIZZLE_X;
-	       swizzles[1] = SWIZZLE_ZERO;
-	       swizzles[2] = SWIZZLE_ZERO;
-	       swizzles[3] = SWIZZLE_ONE;
-	       break;
-	    }
-	 }
+         const bool alpha_depth = t->DepthMode == GL_ALPHA &&
+            (img->_BaseFormat == GL_DEPTH_COMPONENT ||
+             img->_BaseFormat == GL_DEPTH_STENCIL);
+
+         /* Haswell handles texture swizzling as surface format overrides
+          * (except for GL_ALPHA); all other platforms need MOVs in the shader.
+          */
+         if (!intel->is_haswell || alpha_depth)
+            key->swizzles[s] = brw_get_texture_swizzle(t);
 
 	 if (img->InternalFormat == GL_YCBCR_MESA) {
 	    key->yuvtex_mask |= 1 << s;
 	    if (img->TexFormat == MESA_FORMAT_YCBCR)
 		key->yuvtex_swap_mask |= 1 << s;
 	 }
-
-	 key->swizzles[s] =
-	    MAKE_SWIZZLE4(swizzles[GET_SWZ(t->_Swizzle, 0)],
-			  swizzles[GET_SWZ(t->_Swizzle, 1)],
-			  swizzles[GET_SWZ(t->_Swizzle, 2)],
-			  swizzles[GET_SWZ(t->_Swizzle, 3)]);
 
 	 if (sampler->MinFilter != GL_NEAREST &&
 	     sampler->MagFilter != GL_NEAREST) {

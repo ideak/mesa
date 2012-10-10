@@ -42,35 +42,6 @@
 #include "evergreen_compute_internal.h"
 #include <inttypes.h>
 
-static struct r600_texture * create_pool_texture(struct r600_screen * screen,
-		unsigned size_in_dw)
-{
-
-	struct pipe_resource templ;
-	struct r600_texture * tex;
-
-	if (size_in_dw == 0) {
-		return NULL;
-	}
-	memset(&templ, 0, sizeof(templ));
-	templ.target = PIPE_TEXTURE_1D;
-	templ.format = PIPE_FORMAT_R32_UINT;
-	templ.bind = PIPE_BIND_CUSTOM;
-	templ.usage = PIPE_USAGE_IMMUTABLE;
-	templ.flags = 0;
-	templ.width0 = size_in_dw;
-	templ.height0 = 1;
-	templ.depth0 = 1;
-	templ.array_size = 1;
-
-	tex = (struct r600_texture *)r600_texture_create(
-						&screen->screen, &templ);
-	/* XXX: Propagate this error */
-	assert(tex && "Out of memory");
-	tex->is_rat = 1;
-	return tex;
-}
-
 /**
  * Creates a new pool
  */
@@ -93,14 +64,11 @@ static void compute_memory_pool_init(struct compute_memory_pool * pool,
 	COMPUTE_DBG("* compute_memory_pool_init() initial_size_in_dw = %ld\n",
 		initial_size_in_dw);
 
-	/* XXX: pool->shadow is used when the buffer needs to be resized, but
-	 * resizing does not work at the moment.
-	 * pool->shadow = (uint32_t*)CALLOC(4, pool->size_in_dw);
-	 */
+	pool->shadow = (uint32_t*)CALLOC(initial_size_in_dw, 4);
 	pool->next_id = 1;
 	pool->size_in_dw = initial_size_in_dw;
-	pool->bo = (struct r600_resource*)create_pool_texture(pool->screen,
-							pool->size_in_dw);
+	pool->bo = (struct r600_resource*)r600_compute_buffer_alloc_vram(pool->screen,
+							pool->size_in_dw * 4);
 }
 
 /**
@@ -164,6 +132,11 @@ struct compute_memory_item* compute_memory_postalloc_chunk(
 	COMPUTE_DBG("* compute_memory_postalloc_chunck() start_in_dw = %ld\n",
 		start_in_dw);
 
+	/* Check if we can insert it in the front of the list */
+	if (pool->item_list && pool->item_list->start_in_dw > start_in_dw) {
+		return NULL;
+	}
+
 	for (item = pool->item_list; item; item = item->next) {
 		if (item->next) {
 			if (item->start_in_dw < start_in_dw
@@ -193,19 +166,9 @@ void compute_memory_grow_pool(struct compute_memory_pool* pool,
 
 	assert(new_size_in_dw >= pool->size_in_dw);
 
-	assert(!pool->bo && "Growing the global memory pool is not yet "
-		"supported.  You will see this message if you are trying to"
-		"use more than 64 kb of memory");
-
 	if (!pool->bo) {
-		compute_memory_pool_init(pool, 1024 * 16);
+		compute_memory_pool_init(pool, MAX2(new_size_in_dw, 1024 * 16));
 	} else {
-		/* XXX: Growing memory pools does not work at the moment.  I think
-		 * it is because we are using fragment shaders to copy data to
-		 * the new texture and some of the compute registers are being
-		 * included in the 3D command stream. */
-		fprintf(stderr, "Warning: growing the global memory pool to"
-				"more than 64 kb is not yet supported\n");
 		new_size_in_dw += 1024 - (new_size_in_dw % 1024);
 
 		COMPUTE_DBG("  Aligned size = %d\n", new_size_in_dw);
@@ -216,9 +179,9 @@ void compute_memory_grow_pool(struct compute_memory_pool* pool,
 		pool->screen->screen.resource_destroy(
 			(struct pipe_screen *)pool->screen,
 			(struct pipe_resource *)pool->bo);
-		pool->bo = (struct r600_resource*)create_pool_texture(
+		pool->bo = (struct r600_resource*)r600_compute_buffer_alloc_vram(
 							pool->screen,
-							pool->size_in_dw);
+							pool->size_in_dw * 4);
 		compute_memory_shadow(pool, pipe, 0);
 	}
 }
@@ -257,14 +220,18 @@ void compute_memory_finalize_pending(struct compute_memory_pool* pool,
 	COMPUTE_DBG("* compute_memory_finalize_pending()\n");
 
 	for (item = pool->item_list; item; item = item->next) {
-		COMPUTE_DBG("list: %i %p\n", item->start_in_dw, item->next);
+		COMPUTE_DBG("  + list: offset = %i id = %i size = %i "
+			"(%i bytes)\n",item->start_in_dw, item->id,
+			item->size_in_dw, item->size_in_dw * 4);
 	}
 
+	/* Search through the list of memory items in the pool */
 	for (item = pool->item_list; item; item = next) {
 		next = item->next;
 
-
+		/* Check if the item is pending. */
 		if (item->start_in_dw == -1) {
+			/* It is pending, so add it to the pending_list... */
 			if (end_p) {
 				end_p->next = item;
 			}
@@ -272,6 +239,7 @@ void compute_memory_finalize_pending(struct compute_memory_pool* pool,
 				pending_list = item;
 			}
 
+			/* ... and then remove it from the item list. */
 			if (item->prev) {
 				item->prev->next = next;
 			}
@@ -283,26 +251,50 @@ void compute_memory_finalize_pending(struct compute_memory_pool* pool,
 				next->prev = item->prev;
 			}
 
+			/* This sequence makes the item be at the end of the list */
 			item->prev = end_p;
 			item->next = NULL;
 			end_p = item;
 
+			/* Update the amount of space we will need to allocate. */
 			unallocated += item->size_in_dw+1024;
 		}
 		else {
+			/* The item is not pendng, so update the amount of space
+			 * that has already been allocated. */
 			allocated += item->size_in_dw;
 		}
 	}
 
+	/* If we require more space than the size of the pool, then grow the
+	 * pool.
+	 *
+	 * XXX: I'm pretty sure this won't work.  Imagine this scenario:
+	 *
+	 * Offset Item Size
+	 *   0    A    50
+	 * 200    B    50
+	 * 400    C    50
+	 *
+	 * Total size = 450
+	 * Allocated size = 150
+	 * Pending Item D Size = 200
+	 *
+	 * In this case, there are 300 units of free space in the pool, but
+	 * they aren't contiguous, so it will be impossible to allocate Item D.
+	 */
 	if (pool->size_in_dw < allocated+unallocated) {
 		compute_memory_grow_pool(pool, pipe, allocated+unallocated);
 	}
 
+	/* Loop through all the pending items, allocate space for them and
+	 * add them back to the item_list. */
 	for (item = pending_list; item; item = next) {
 		next = item->next;
 
 		int64_t start_in_dw;
 
+		/* Search for free space in the pool for this item. */
 		while ((start_in_dw=compute_memory_prealloc_chunk(pool,
 						item->size_in_dw)) == -1) {
 			int64_t need = item->size_in_dw+2048 -
@@ -323,6 +315,10 @@ void compute_memory_finalize_pending(struct compute_memory_pool* pool,
 						pool->size_in_dw + need);
 			}
 		}
+		COMPUTE_DBG("  + Found space for Item %p id = %u "
+			"start_in_dw = %u (%u bytes) size_in_dw = %u (%u bytes)\n",
+			item, item->id, start_in_dw, start_in_dw * 4,
+			item->size_in_dw, item->size_in_dw * 4);
 
 		item->start_in_dw = start_in_dw;
 		item->next = NULL;
@@ -332,12 +328,24 @@ void compute_memory_finalize_pending(struct compute_memory_pool* pool,
 			struct compute_memory_item *pos;
 
 			pos = compute_memory_postalloc_chunk(pool, start_in_dw);
-			item->prev = pos;
-			item->next = pos->next;
-			pos->next = item;
-
-			if (item->next) {
-				item->next->prev = item;
+			if (pos) {
+				item->prev = pos;
+				item->next = pos->next;
+				pos->next = item;
+				if (item->next) {
+					item->next->prev = item;
+				}
+			} else {
+				/* Add item to the front of the list */
+				item->next = pool->item_list->next;
+				if (pool->item_list->next) {
+					pool->item_list->next->prev = item;
+				}
+				item->prev = pool->item_list->prev;
+				if (pool->item_list->prev) {
+					pool->item_list->prev->next = item;
+				}
+				pool->item_list = item;
 			}
 		}
 		else {
@@ -391,7 +399,8 @@ struct compute_memory_item* compute_memory_alloc(
 {
 	struct compute_memory_item *new_item;
 
-	COMPUTE_DBG("* compute_memory_alloc() size_in_dw = %ld\n", size_in_dw);
+	COMPUTE_DBG("* compute_memory_alloc() size_in_dw = %ld (%ld bytes)\n",
+			size_in_dw, 4 * size_in_dw);
 
 	new_item = (struct compute_memory_item *)
 				CALLOC(sizeof(struct compute_memory_item), 1);
@@ -413,6 +422,9 @@ struct compute_memory_item* compute_memory_alloc(
 		pool->item_list = new_item;
 	}
 
+	COMPUTE_DBG("  + Adding item %p id = %u size = %u (%u bytes)\n",
+			new_item, new_item->id, new_item->size_in_dw,
+			new_item->size_in_dw * 4);
 	return new_item;
 }
 

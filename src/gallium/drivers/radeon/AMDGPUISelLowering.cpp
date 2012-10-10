@@ -34,6 +34,7 @@ AMDGPUTargetLowering::AMDGPUTargetLowering(TargetMachine &TM) :
   // for them.
   setOperationAction(ISD::FCEIL,  MVT::f32, Legal);
   setOperationAction(ISD::FEXP2,  MVT::f32, Legal);
+  setOperationAction(ISD::FPOW,   MVT::f32, Legal);
   setOperationAction(ISD::FRINT,  MVT::f32, Legal);
 
   setOperationAction(ISD::UDIV, MVT::i32, Expand);
@@ -345,5 +346,7 @@ const char* AMDGPUTargetLowering::getTargetNodeName(unsigned Opcode) const
   NODE_NAME_CASE(SMIN)
   NODE_NAME_CASE(UMIN)
   NODE_NAME_CASE(URECIP)
+  NODE_NAME_CASE(INTERP)
+  NODE_NAME_CASE(INTERP_P0)
   }
 }

@@ -219,10 +219,9 @@ static struct pipe_context *r600_create_context(struct pipe_screen *screen, void
 	switch (rctx->chip_class) {
 	case TAHITI:
 		si_init_state_functions(rctx);
-		if (si_context_init(rctx)) {
-			r600_destroy_context(&rctx->context);
-			return NULL;
-		}
+		LIST_INITHEAD(&rctx->active_query_list);
+		rctx->cs = rctx->ws->cs_create(rctx->ws);
+		rctx->max_db = 8;
 		si_init_config(rctx);
 		break;
 	default:
@@ -345,6 +344,7 @@ static int r600_get_param(struct pipe_screen* pscreen, enum pipe_cap param)
 	case PIPE_CAP_VERTEX_COLOR_CLAMPED:
 	case PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION:
 	case PIPE_CAP_USER_VERTEX_BUFFERS:
+	case PIPE_CAP_TEXTURE_MULTISAMPLE:
 		return 0;
 
 	/* Stream output. */

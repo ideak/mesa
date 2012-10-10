@@ -159,9 +159,6 @@ static void r600_destroy_context(struct pipe_context *context)
 	pipe_resource_reference((struct pipe_resource**)&rctx->dummy_cmask, NULL);
 	pipe_resource_reference((struct pipe_resource**)&rctx->dummy_fmask, NULL);
 
-	if (rctx->no_blend) {
-		rctx->context.delete_blend_state(&rctx->context, rctx->no_blend);
-	}
 	if (rctx->dummy_pixel_shader) {
 		rctx->context.delete_fs_state(&rctx->context, rctx->dummy_pixel_shader);
 	}
@@ -174,17 +171,13 @@ static void r600_destroy_context(struct pipe_context *context)
 	if (rctx->custom_blend_decompress) {
 		rctx->context.delete_blend_state(&rctx->context, rctx->custom_blend_decompress);
 	}
-	util_unreference_framebuffer_state(&rctx->framebuffer);
+	util_unreference_framebuffer_state(&rctx->framebuffer.state);
 
 	r600_context_fini(rctx);
 
 	if (rctx->blitter) {
 		util_blitter_destroy(rctx->blitter);
 	}
-	for (int i = 0; i < R600_PIPE_NSTATES; i++) {
-		free(rctx->states[i]);
-	}
-
 	if (rctx->uploader) {
 		u_upload_destroy(rctx->uploader);
 	}
@@ -204,7 +197,6 @@ static struct pipe_context *r600_create_context(struct pipe_screen *screen, void
 {
 	struct r600_context *rctx = CALLOC_STRUCT(r600_context);
 	struct r600_screen* rscreen = (struct r600_screen *)screen;
-	struct pipe_blend_state no_blend = {};
 
 	if (rctx == NULL)
 		return NULL;
@@ -223,6 +215,7 @@ static struct pipe_context *r600_create_context(struct pipe_screen *screen, void
 	rctx->ws = rscreen->ws;
 	rctx->family = rscreen->family;
 	rctx->chip_class = rscreen->chip_class;
+	rctx->keep_tiling_flags = rscreen->info.drm_minor >= 12;
 
 	LIST_INITHEAD(&rctx->active_timer_queries);
 	LIST_INITHEAD(&rctx->active_nontimer_queries);
@@ -301,17 +294,11 @@ static struct pipe_context *r600_create_context(struct pipe_screen *screen, void
 	r600_begin_new_cs(rctx);
 	r600_get_backend_mask(rctx); /* this emits commands and must be last */
 
-	if (rctx->chip_class == R600)
-		r600_set_max_scissor(rctx);
-
 	rctx->dummy_pixel_shader =
 		util_make_fragment_cloneinput_shader(&rctx->context, 0,
 						     TGSI_SEMANTIC_GENERIC,
 						     TGSI_INTERPOLATE_CONSTANT);
 	rctx->context.bind_fs_state(&rctx->context, rctx->dummy_pixel_shader);
-
-	no_blend.rt[0].colormask = 0xF;
-	rctx->no_blend = rctx->context.create_blend_state(&rctx->context, &no_blend);
 
 	return &rctx->context;
 
@@ -406,6 +393,7 @@ static int r600_get_param(struct pipe_screen* pscreen, enum pipe_cap param)
 	case PIPE_CAP_COMPUTE:
 	case PIPE_CAP_START_INSTANCE:
 	case PIPE_CAP_MAX_DUAL_SOURCE_RENDER_TARGETS:
+        case PIPE_CAP_TEXTURE_MULTISAMPLE:
 		return 1;
 
 	case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
@@ -643,10 +631,9 @@ static int r600_get_compute_param(struct pipe_screen *screen,
 	case PIPE_COMPUTE_CAP_MAX_GLOBAL_SIZE:
 		if (ret) {
 			uint64_t * max_global_size = ret;
-			/* XXX: This is 64kb for now until we get the
-			 * compute memory pool working correctly.
-			 */
-			*max_global_size = 1024 * 16 * 4;
+			/* XXX: This is what the proprietary driver reports, we
+			 * may want to use a different value. */
+			*max_global_size = 201326592;
 		}
 		return sizeof(uint64_t);
 
@@ -663,6 +650,22 @@ static int r600_get_compute_param(struct pipe_screen *screen,
 			/* XXX: This is what the proprietary driver reports, we
 			 * may want to use a different value. */
 			*max_local_size = 32768;
+		}
+		return sizeof(uint64_t);
+
+	case PIPE_COMPUTE_CAP_MAX_MEM_ALLOC_SIZE:
+		if (ret) {
+			uint64_t max_global_size;
+			uint64_t * max_mem_alloc_size = ret;
+			r600_get_compute_param(screen,
+					PIPE_COMPUTE_CAP_MAX_GLOBAL_SIZE,
+					&max_global_size);
+			/* OpenCL requres this value be at least
+			 * max(MAX_GLOBAL_SIZE / 4, 128 * 1024 *1024)
+			 * I'm really not sure what value to report here, but
+			 * MAX_GLOBAL_SIZE / 4 seems resonable.
+			 */
+			*max_mem_alloc_size = max_global_size / 4;
 		}
 		return sizeof(uint64_t);
 
@@ -932,12 +935,18 @@ struct pipe_screen *r600_screen_create(struct radeon_winsys *ws)
 	/* Figure out streamout kernel support. */
 	switch (rscreen->chip_class) {
 	case R600:
-	case EVERGREEN:
-	case CAYMAN:
-		rscreen->has_streamout = rscreen->info.drm_minor >= 14;
+		if (rscreen->family < CHIP_RS780) {
+			rscreen->has_streamout = rscreen->info.drm_minor >= 14;
+		} else {
+			rscreen->has_streamout = rscreen->info.drm_minor >= 23;
+		}
 		break;
 	case R700:
 		rscreen->has_streamout = rscreen->info.drm_minor >= 17;
+		break;
+	case EVERGREEN:
+	case CAYMAN:
+		rscreen->has_streamout = rscreen->info.drm_minor >= 14;
 		break;
 	}
 

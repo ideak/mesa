@@ -26,6 +26,7 @@
  **************************************************************************/
 
 #include <errno.h>
+#include <time.h>
 #include "main/glheader.h"
 #include "main/context.h"
 #include "main/framebuffer.h"
@@ -190,7 +191,7 @@ static const struct __DRI2flushExtensionRec intelFlushExtension = {
     dri2InvalidateDrawable,
 };
 
-struct intel_image_format intel_image_formats[] = {
+static struct intel_image_format intel_image_formats[] = {
    { __DRI_IMAGE_FOURCC_ARGB8888, __DRI_IMAGE_COMPONENTS_RGBA, 1,
      { { 0, 0, 0, __DRI_IMAGE_FORMAT_ARGB8888, 4 } } },
 
@@ -821,7 +822,9 @@ intelCreateContext(gl_api api,
    if (success)
       return true;
 
-   intelDestroyContext(driContextPriv);
+   if (driContextPriv->driverPrivate != NULL)
+      intelDestroyContext(driContextPriv);
+
    return false;
 }
 
@@ -909,8 +912,9 @@ intel_detect_swizzling(struct intel_screen *screen)
 static __DRIconfig**
 intel_screen_make_configs(__DRIscreen *dri_screen)
 {
+   /* GLX_SWAP_COPY_OML is not supported due to page flipping. */
    static const GLenum back_buffer_modes[] = {
-       GLX_NONE, GLX_SWAP_UNDEFINED_OML, GLX_SWAP_COPY_OML
+       GLX_SWAP_UNDEFINED_OML, GLX_NONE,
    };
 
    static const uint8_t singlesample_samples[1] = {0};
@@ -955,8 +959,7 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
                                      depth_bits,
                                      stencil_bits,
                                      num_depth_stencil_bits,
-                                     back_buffer_modes,
-                                     ARRAY_SIZE(back_buffer_modes),
+                                     back_buffer_modes, 2,
                                      singlesample_samples, 1,
                                      false);
       configs = driConcatConfigs(configs, new_configs);
@@ -978,7 +981,7 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
 
       new_configs = driCreateConfigs(fb_format[i], fb_type[i],
                                      depth_bits, stencil_bits, 1,
-                                     back_buffer_modes + 1, 1,
+                                     back_buffer_modes, 1,
                                      singlesample_samples, 1,
                                      true);
       configs = driConcatConfigs(configs, new_configs);
@@ -995,7 +998,7 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
     *
     * Only doublebuffer configs with GLX_SWAP_UNDEFINED_OML behavior are
     * supported.  Singlebuffer configs are not supported because no one wants
-    * them. GLX_SWAP_COPY_OML is not supported due to page flipping.
+    * them.
     */
    for (int i = 0; i < ARRAY_SIZE(fb_format); i++) {
       if (screen->gen < 6)
@@ -1025,7 +1028,7 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
                                      depth_bits,
                                      stencil_bits,
                                      num_depth_stencil_bits,
-                                     back_buffer_modes + 1, 1,
+                                     back_buffer_modes, 1,
                                      multisample_samples,
                                      num_msaa_modes,
                                      false);

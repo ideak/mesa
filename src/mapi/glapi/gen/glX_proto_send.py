@@ -169,11 +169,9 @@ class PrintGlxProtoStubs(glX_proto_common.glx_print_proto):
 		print '#include "glapi.h"'
 		print '#include "glthread.h"'
 		print '#include <GL/glxproto.h>'
-		print '#ifdef USE_XCB'
 		print '#include <X11/Xlib-xcb.h>'
 		print '#include <xcb/xcb.h>'
 		print '#include <xcb/glx.h>'
-		print '#endif /* USE_XCB */'
 
 		print ''
 		print '#define __GLX_PAD(n) (((n) + 3) & ~3)'
@@ -423,7 +421,7 @@ __indirect_get_proc_address(const char *name)
 				print ''
 				print '#if defined(GLX_DIRECT_RENDERING) && !defined(GLX_USE_APPLEGL)'
 				print '    if (gc->isDirect) {'
-				print '        const _glapi_proc *const disp_table = GET_DISPATCH();'
+				print '        const _glapi_proc *const disp_table = (_glapi_proc *)GET_DISPATCH();'
 				print '        PFNGL%sPROC p =' % (name.upper())
 				print '            (PFNGL%sPROC) disp_table[%d];' % (name.upper(), func.offset)
 				print '    %sp(%s);' % (ret_string, func.get_called_parameter_string())

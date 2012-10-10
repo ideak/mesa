@@ -1801,18 +1801,7 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
 	tl_y = 0;
 	br_x = state->width;
 	br_y = state->height;
-#if 0 /* These shouldn't be necessary on SI, see PA_SC_ENHANCE register */
-	/* EG hw workaround */
-	if (br_x == 0)
-		tl_x = 1;
-	if (br_y == 0)
-		tl_y = 1;
-	/* cayman hw workaround */
-	if (rctx->chip_class == CAYMAN) {
-		if (br_x == 1 && br_y == 1)
-			br_x = 2;
-	}
-#endif
+
 	tl = S_028240_TL_X(tl_x) | S_028240_TL_Y(tl_y);
 	br = S_028244_BR_X(br_x) | S_028244_BR_Y(br_y);
 
@@ -1969,7 +1958,6 @@ static void si_bind_vs_shader(struct pipe_context *ctx, void *state)
 	if (rctx->vs_shader == sel)
 		return;
 
-	rctx->shader_dirty = true;
 	rctx->vs_shader = sel;
 
 	if (sel && sel->current)
@@ -1986,7 +1974,6 @@ static void si_bind_ps_shader(struct pipe_context *ctx, void *state)
 	if (rctx->ps_shader == sel)
 		return;
 
-	rctx->shader_dirty = true;
 	rctx->ps_shader = sel;
 
 	if (sel && sel->current)
@@ -2280,7 +2267,7 @@ static void si_set_ps_sampler_view(struct pipe_context *ctx, unsigned count,
 			pipe_sampler_view_reference((struct pipe_sampler_view **)&rctx->ps_samplers.views[i], NULL);
 	}
 
-	si_pm4_sh_data_end(pm4, R_00B040_SPI_SHADER_USER_DATA_PS_4);
+	si_pm4_sh_data_end(pm4, R_00B030_SPI_SHADER_USER_DATA_PS_0, SI_SGPR_RESOURCE);
 
 out:
 	si_pm4_set_state(rctx, ps_sampler_views, pm4);
@@ -2347,7 +2334,7 @@ static void si_bind_ps_sampler(struct pipe_context *ctx, unsigned count, void **
 			si_pm4_sh_data_add(pm4, rstates[i] ? rstates[i]->val[j] : 0);
 		}
 	}
-	si_pm4_sh_data_end(pm4, R_00B038_SPI_SHADER_USER_DATA_PS_2);
+	si_pm4_sh_data_end(pm4, R_00B030_SPI_SHADER_USER_DATA_PS_0, SI_SGPR_SAMPLER);
 
 	if (border_color_table) {
 		uint64_t va_offset =
@@ -2384,7 +2371,7 @@ static void si_set_constant_buffer(struct pipe_context *ctx, uint shader, uint i
 	struct si_resource *rbuffer = cb ? si_resource(cb->buffer) : NULL;
 	struct si_pm4_state *pm4;
 	uint64_t va_offset;
-	uint32_t offset;
+	uint32_t reg, offset;
 
 	/* Note that the state tracker can unbind constant buffers by
 	 * passing NULL here.
@@ -2406,14 +2393,16 @@ static void si_set_constant_buffer(struct pipe_context *ctx, uint shader, uint i
 
 	switch (shader) {
 	case PIPE_SHADER_VERTEX:
-		si_pm4_set_reg(pm4, R_00B130_SPI_SHADER_USER_DATA_VS_0, va_offset);
-		si_pm4_set_reg(pm4, R_00B134_SPI_SHADER_USER_DATA_VS_1, va_offset >> 32);
+		reg = R_00B130_SPI_SHADER_USER_DATA_VS_0 + SI_SGPR_CONST * 4;
+		si_pm4_set_reg(pm4, reg, va_offset);
+		si_pm4_set_reg(pm4, reg + 4, va_offset >> 32);
 		si_pm4_set_state(rctx, vs_const, pm4);
 		break;
 
 	case PIPE_SHADER_FRAGMENT:
-		si_pm4_set_reg(pm4, R_00B030_SPI_SHADER_USER_DATA_PS_0, va_offset);
-		si_pm4_set_reg(pm4, R_00B034_SPI_SHADER_USER_DATA_PS_1, va_offset >> 32);
+		reg = R_00B030_SPI_SHADER_USER_DATA_PS_0 + SI_SGPR_CONST * 4;
+		si_pm4_set_reg(pm4, reg, va_offset);
+		si_pm4_set_reg(pm4, reg + 4, va_offset >> 32);
 		si_pm4_set_state(rctx, ps_const, pm4);
 		break;
 
@@ -2598,10 +2587,7 @@ void si_init_config(struct r600_context *rctx)
 {
 	struct si_pm4_state *pm4 = CALLOC_STRUCT(si_pm4_state);
 
-	si_pm4_cmd_begin(pm4, PKT3_CONTEXT_CONTROL);
-	si_pm4_cmd_add(pm4, 0x80000000);
-	si_pm4_cmd_add(pm4, 0x80000000);
-	si_pm4_cmd_end(pm4, false);
+	si_cmd_context_control(pm4);
 
 	si_pm4_set_reg(pm4, R_028A4C_PA_SC_MODE_CNTL_1, 0x0);
 
@@ -2635,6 +2621,8 @@ void si_init_config(struct r600_context *rctx)
 	si_pm4_set_reg(pm4, R_028BD8_PA_SC_CENTROID_PRIORITY_1, 0xfedcba98);
 
 	si_pm4_set_reg(pm4, R_028804_DB_EQAA, 0x110000);
+
+	si_pm4_set_reg(pm4, R_02882C_PA_SU_PRIM_FILTER_CNTL, 0);
 
 	si_pm4_set_state(rctx, init, pm4);
 }

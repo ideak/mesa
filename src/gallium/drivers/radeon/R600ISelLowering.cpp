@@ -34,6 +34,9 @@ R600TargetLowering::R600TargetLowering(TargetMachine &TM) :
   addRegisterClass(MVT::i32, &AMDGPU::R600_Reg32RegClass);
   computeRegisterProperties();
 
+  setOperationAction(ISD::FADD, MVT::v4f32, Expand);
+  setOperationAction(ISD::FMUL, MVT::v4f32, Expand);
+
   setOperationAction(ISD::BR_CC, MVT::i32, Custom);
   setOperationAction(ISD::BR_CC, MVT::f32, Custom);
   
@@ -41,6 +44,7 @@ R600TargetLowering::R600TargetLowering(TargetMachine &TM) :
 
   setOperationAction(ISD::INTRINSIC_VOID, MVT::Other, Custom);
   setOperationAction(ISD::INTRINSIC_WO_CHAIN, MVT::Other, Custom);
+  setOperationAction(ISD::INTRINSIC_WO_CHAIN, MVT::i1, Custom);
 
   setOperationAction(ISD::ROTL, MVT::i32, Custom);
 
@@ -50,6 +54,9 @@ R600TargetLowering::R600TargetLowering(TargetMachine &TM) :
   setOperationAction(ISD::SETCC, MVT::i32, Custom);
   setOperationAction(ISD::SETCC, MVT::f32, Custom);
   setOperationAction(ISD::FP_TO_UINT, MVT::i1, Custom);
+
+  setTargetDAGCombine(ISD::FP_ROUND);
+
   setSchedulingPreference(Sched::VLIW);
 }
 
@@ -118,7 +125,8 @@ MachineBasicBlock * R600TargetLowering::EmitInstrWithCustomInserter(
       return BB;
     }
 
-  case AMDGPU::RAT_WRITE_CACHELESS_eg:
+  case AMDGPU::RAT_WRITE_CACHELESS_32_eg:
+  case AMDGPU::RAT_WRITE_CACHELESS_128_eg:
     {
       // Convert to DWORD address
       unsigned NewAddr = MRI.createVirtualRegister(
@@ -233,6 +241,29 @@ MachineBasicBlock * R600TargetLowering::EmitInstrWithCustomInserter(
               .addReg(AMDGPU::PREDICATE_BIT, RegState::Kill);
       break;
     }
+  case AMDGPU::input_perspective:
+    {
+      R600MachineFunctionInfo *MFI = MF->getInfo<R600MachineFunctionInfo>();
+
+      // XXX Be more fine about register reservation
+      for (unsigned i = 0; i < 4; i ++) {
+        unsigned ReservedReg = AMDGPU::R600_TReg32RegClass.getRegister(i);
+        MFI->ReservedRegs.push_back(ReservedReg);
+      }
+
+      switch (MI->getOperand(1).getImm()) {
+      case 0:// Perspective
+        MFI->HasPerspectiveInterpolation = true;
+        break;
+      case 1:// Linear
+        MFI->HasLinearInterpolation = true;
+        break;
+      default:
+        assert(0 && "Unknow ij index");
+      }
+
+      return BB;
+    }
   }
 
   MI->eraseFromParent();
@@ -287,7 +318,48 @@ SDValue R600TargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const
       unsigned Reg = AMDGPU::R600_TReg32RegClass.getRegister(RegIndex);
       return CreateLiveInRegister(DAG, &AMDGPU::R600_TReg32RegClass, Reg, VT);
     }
-
+    case AMDGPUIntrinsic::R600_load_input_perspective: {
+      unsigned slot = cast<ConstantSDNode>(Op.getOperand(1))->getZExtValue();
+      SDValue FullVector = DAG.getNode(
+          AMDGPUISD::INTERP,
+          DL, MVT::v4f32,
+          DAG.getConstant(0, MVT::i32), DAG.getConstant(slot / 4 , MVT::i32));
+      return DAG.getNode(ISD::EXTRACT_VECTOR_ELT,
+        DL, VT, FullVector, DAG.getConstant(slot % 4, MVT::i32));
+    }
+    case AMDGPUIntrinsic::R600_load_input_linear: {
+      unsigned slot = cast<ConstantSDNode>(Op.getOperand(1))->getZExtValue();
+      SDValue FullVector = DAG.getNode(
+        AMDGPUISD::INTERP,
+        DL, MVT::v4f32,
+        DAG.getConstant(1, MVT::i32), DAG.getConstant(slot / 4 , MVT::i32));
+      return DAG.getNode(ISD::EXTRACT_VECTOR_ELT,
+        DL, VT, FullVector, DAG.getConstant(slot % 4, MVT::i32));
+    }
+    case AMDGPUIntrinsic::R600_load_input_constant: {
+      unsigned slot = cast<ConstantSDNode>(Op.getOperand(1))->getZExtValue();
+      SDValue FullVector = DAG.getNode(
+        AMDGPUISD::INTERP_P0,
+        DL, MVT::v4f32,
+        DAG.getConstant(slot / 4 , MVT::i32));
+      return DAG.getNode(ISD::EXTRACT_VECTOR_ELT,
+          DL, VT, FullVector, DAG.getConstant(slot % 4, MVT::i32));
+    }
+    case AMDGPUIntrinsic::R600_load_input_position: {
+      unsigned slot = cast<ConstantSDNode>(Op.getOperand(1))->getZExtValue();
+      unsigned RegIndex = AMDGPU::R600_TReg32RegClass.getRegister(slot);
+      SDValue Reg = CreateLiveInRegister(DAG, &AMDGPU::R600_TReg32RegClass,
+	    RegIndex, MVT::f32);
+      if ((slot % 4) == 3) {
+        return DAG.getNode(ISD::FDIV,
+            DL, VT,
+            DAG.getConstantFP(1.0f, MVT::f32),
+            Reg);
+      } else {
+        return Reg;
+      }
+    }
+ 
     case r600_read_ngroups_x:
       return LowerImplicitParameter(DAG, VT, DL, 0);
     case r600_read_ngroups_y:
@@ -340,7 +412,28 @@ void R600TargetLowering::ReplaceNodeResults(SDNode *N,
   switch (N->getOpcode()) {
   default: return;
   case ISD::FP_TO_UINT: Results.push_back(LowerFPTOUINT(N->getOperand(0), DAG));
+  case ISD::INTRINSIC_WO_CHAIN:
+    {
+      unsigned IntrinsicID =
+          cast<ConstantSDNode>(N->getOperand(0))->getZExtValue();
+      if (IntrinsicID == AMDGPUIntrinsic::R600_load_input_face) {
+        Results.push_back(LowerInputFace(N, DAG));
+      } else {
+        return;
+      }
+    }
   }
+}
+
+SDValue R600TargetLowering::LowerInputFace(SDNode* Op, SelectionDAG &DAG) const
+{
+  unsigned slot = cast<ConstantSDNode>(Op->getOperand(1))->getZExtValue();
+  unsigned RegIndex = AMDGPU::R600_TReg32RegClass.getRegister(slot);
+  SDValue Reg = CreateLiveInRegister(DAG, &AMDGPU::R600_TReg32RegClass,
+      RegIndex, MVT::f32);
+  return DAG.getNode(ISD::SETCC, Op->getDebugLoc(), MVT::i1,
+      Reg, DAG.getConstantFP(0.0f, MVT::f32),
+      DAG.getCondCode(ISD::SETUGT));
 }
 
 SDValue R600TargetLowering::LowerFPTOUINT(SDValue Op, SelectionDAG &DAG) const
@@ -423,6 +516,17 @@ SDValue R600TargetLowering::LowerROTL(SDValue Op, SelectionDAG &DAG) const
                                  Op.getOperand(1)));
 }
 
+bool R600TargetLowering::isZero(SDValue Op) const
+{
+  if(ConstantSDNode *Cst = dyn_cast<ConstantSDNode>(Op)) {
+    return Cst->isNullValue();
+  } else if(ConstantFPSDNode *CstFP = dyn_cast<ConstantFPSDNode>(Op)){
+    return CstFP->isZero();
+  } else {
+    return false;
+  }
+}
+
 SDValue R600TargetLowering::LowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const
 {
   DebugLoc DL = Op.getDebugLoc();
@@ -475,47 +579,58 @@ SDValue R600TargetLowering::LowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const
   if (isHWTrueValue(False) && isHWFalseValue(True)) {
   }
 
-  // XXX Check if we can lower this to a SELECT or if it is supported by a native
-  // operation. (The code below does this but we don't have the Instruction
-  // selection patterns to do this yet.
-#if 0
+  // Check if we can lower this to a native operation.
+  // CND* instructions requires all operands to have the same type,
+  // and RHS to be zero.
+
   if (isZero(LHS) || isZero(RHS)) {
     SDValue Cond = (isZero(LHS) ? RHS : LHS);
-    bool SwapTF = false;
+    SDValue Zero = (isZero(LHS) ? LHS : RHS);
+    ISD::CondCode CCOpcode = cast<CondCodeSDNode>(CC)->get();
+    if (CompareVT != VT) {
+      True = DAG.getNode(ISD::BITCAST, DL, CompareVT, True);
+      False = DAG.getNode(ISD::BITCAST, DL, CompareVT, False);
+    }
+    if (isZero(LHS)) {
+      CCOpcode = ISD::getSetCCSwappedOperands(CCOpcode);
+    }
+
     switch (CCOpcode) {
-    case ISD::SETOEQ:
-    case ISD::SETUEQ:
-    case ISD::SETEQ:
-      SwapTF = true;
-      // Fall through
     case ISD::SETONE:
     case ISD::SETUNE:
     case ISD::SETNE:
-      // We can lower to select
-      if (SwapTF) {
-        Temp = True;
-        True = False;
-        False = Temp;
-      }
-      // CNDE
-      return DAG.getNode(ISD::SELECT, DL, VT, Cond, True, False);
+    case ISD::SETULE:
+    case ISD::SETULT:
+    case ISD::SETOLE:
+    case ISD::SETOLT:
+    case ISD::SETLE:
+    case ISD::SETLT:
+      CCOpcode = ISD::getSetCCInverse(CCOpcode, CompareVT == MVT::i32);
+      Temp = True;
+      True = False;
+      False = Temp;
+      break;
     default:
-      // Supported by a native operation (CNDGE, CNDGT)
-      return DAG.getNode(ISD::SELECT_CC, DL, VT, LHS, RHS, True, False, CC);
+      break;
     }
+    SDValue SelectNode = DAG.getNode(ISD::SELECT_CC, DL, CompareVT,
+        Cond, Zero,
+        True, False,
+        DAG.getCondCode(CCOpcode));
+    return DAG.getNode(ISD::BITCAST, DL, VT, SelectNode);
   }
-#endif
+
 
   // If we make it this for it means we have no native instructions to handle
   // this SELECT_CC, so we must lower it.
   SDValue HWTrue, HWFalse;
 
-  if (VT == MVT::f32) {
-    HWTrue = DAG.getConstantFP(1.0f, VT);
-    HWFalse = DAG.getConstantFP(0.0f, VT);
-  } else if (VT == MVT::i32) {
-    HWTrue = DAG.getConstant(-1, VT);
-    HWFalse = DAG.getConstant(0, VT);
+  if (CompareVT == MVT::f32) {
+    HWTrue = DAG.getConstantFP(1.0f, CompareVT);
+    HWFalse = DAG.getConstantFP(0.0f, CompareVT);
+  } else if (CompareVT == MVT::i32) {
+    HWTrue = DAG.getConstant(-1, CompareVT);
+    HWFalse = DAG.getConstant(0, CompareVT);
   }
   else {
     assert(!"Unhandled value type in LowerSELECT_CC");
@@ -523,15 +638,12 @@ SDValue R600TargetLowering::LowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const
 
   // Lower this unsupported SELECT_CC into a combination of two supported
   // SELECT_CC operations.
-  SDValue Cond = DAG.getNode(ISD::SELECT_CC, DL, VT, LHS, RHS, HWTrue, HWFalse, CC);
+  SDValue Cond = DAG.getNode(ISD::SELECT_CC, DL, CompareVT, LHS, RHS, HWTrue, HWFalse, CC);
 
-  // Convert floating point condition to i1
-  if (VT == MVT::f32) {
-    Cond = DAG.getNode(ISD::FP_TO_SINT, DL, MVT::i32,
-                       DAG.getNode(ISD::FNEG, DL, VT, Cond));
-  }
-
-  return DAG.getNode(ISD::SELECT, DL, VT, Cond, True, False);
+  return DAG.getNode(ISD::SELECT_CC, DL, VT,
+      Cond, HWFalse,
+      True, False,
+      DAG.getCondCode(ISD::SETNE));
 }
 
 SDValue R600TargetLowering::LowerSETCC(SDValue Op, SelectionDAG &DAG) const
@@ -602,4 +714,27 @@ SDValue R600TargetLowering::LowerFormalArguments(
     ParamOffsetBytes += (VT.getStoreSize());
   }
   return Chain;
+}
+
+//===----------------------------------------------------------------------===//
+// Custom DAG Optimizations
+//===----------------------------------------------------------------------===//
+
+SDValue R600TargetLowering::PerformDAGCombine(SDNode *N,
+                                              DAGCombinerInfo &DCI) const
+{
+  SelectionDAG &DAG = DCI.DAG;
+
+  switch (N->getOpcode()) {
+  // (f32 fp_round (f64 uint_to_fp a)) -> (f32 uint_to_fp a)
+  case ISD::FP_ROUND: {
+      SDValue Arg = N->getOperand(0);
+      if (Arg.getOpcode() == ISD::UINT_TO_FP && Arg.getValueType() == MVT::f64) {
+        return DAG.getNode(ISD::UINT_TO_FP, N->getDebugLoc(), N->getValueType(0),
+                           Arg.getOperand(0));
+      }
+      break;
+    }
+  }
+  return SDValue();
 }

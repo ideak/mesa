@@ -86,6 +86,42 @@ static void llvm_load_input(
 				"llvm.R600.load.input",
 				ctx->soa.bld_base.base.elem_type, &reg, 1,
 				LLVMReadNoneAttribute);
+				
+		if (decl->Semantic.Name == TGSI_SEMANTIC_COLOR && ctx->two_side) {
+			unsigned back_reg = ctx->r600_inputs[input_index]
+				.potential_back_facing_reg;
+			unsigned back_soa_index = radeon_llvm_reg_index_soa(
+				ctx->r600_inputs[back_reg].gpr
+				, chan);
+			LLVMValueRef backcolor_reg = lp_build_const_int32(
+				ctx->soa.bld_base.base.gallivm,
+				back_soa_index);
+			LLVMValueRef backcolor = build_intrinsic(
+				ctx->soa.bld_base.base.gallivm->builder,
+				"llvm.R600.load.input",
+				ctx->soa.bld_base.base.elem_type, &backcolor_reg, 1,
+				LLVMReadNoneAttribute);
+			LLVMValueRef face_reg = lp_build_const_int32(
+				ctx->soa.bld_base.base.gallivm,
+				ctx->face_input * 4);
+			LLVMValueRef face = build_intrinsic(
+				ctx->soa.bld_base.base.gallivm->builder,
+				"llvm.R600.load.input",
+				ctx->soa.bld_base.base.elem_type,
+				&face_reg, 1,
+				LLVMReadNoneAttribute);
+			LLVMValueRef is_face_positive = LLVMBuildFCmp(
+				ctx->soa.bld_base.base.gallivm->builder,
+				LLVMRealUGT, face, 
+				lp_build_const_float(ctx->soa.bld_base.base.gallivm, 0.0f),
+				"");
+			ctx->inputs[soa_index] = LLVMBuildSelect(
+				ctx->soa.bld_base.base.gallivm->builder,
+				is_face_positive,
+				ctx->inputs[soa_index],
+				backcolor,
+				"");
+		}
 	}
 }
 
@@ -165,6 +201,20 @@ static void llvm_emit_tex(
 					emit_data->dst_type, args, c, LLVMReadNoneAttribute);
 }
 
+static void emit_cndlt(
+		const struct lp_build_tgsi_action * action,
+		struct lp_build_tgsi_context * bld_base,
+		struct lp_build_emit_data * emit_data)
+{
+	LLVMBuilderRef builder = bld_base->base.gallivm->builder;
+	LLVMValueRef float_zero = lp_build_const_float(
+		bld_base->base.gallivm, 0.0f);
+	LLVMValueRef cmp = LLVMBuildFCmp(
+		builder, LLVMRealULT, emit_data->args[0], float_zero, "");
+	emit_data->output[emit_data->chan] = LLVMBuildSelect(builder,
+		cmp, emit_data->args[1], emit_data->args[2], "");
+}
+
 static void dp_fetch_args(
 	struct lp_build_tgsi_context * bld_base,
 	struct lp_build_emit_data * emit_data)
@@ -241,6 +291,7 @@ LLVMModuleRef r600_tgsi_llvm(
 	bld_base->op_actions[TGSI_OPCODE_TXF].emit = llvm_emit_tex;
 	bld_base->op_actions[TGSI_OPCODE_TXQ].emit = llvm_emit_tex;
 	bld_base->op_actions[TGSI_OPCODE_TXP].emit = llvm_emit_tex;
+	bld_base->op_actions[TGSI_OPCODE_CMP].emit = emit_cndlt;
 
 	lp_build_tgsi_llvm(bld_base, tokens);
 
@@ -261,6 +312,8 @@ const char * r600_llvm_gpu_string(enum radeon_family family)
 	case CHIP_RV635:
 	case CHIP_RS780:
 	case CHIP_RS880:
+		gpu_family = "r600";
+		break;
 	case CHIP_RV710:
 		gpu_family = "rv710";
 		break;

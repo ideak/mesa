@@ -74,6 +74,14 @@ def COND_LE : PatLeaf <
                      case ISD::SETLE: return true;}}}]
 >;
 
+//===----------------------------------------------------------------------===//
+// Load/Store Pattern Fragments
+//===----------------------------------------------------------------------===//
+
+def zextloadi8_global : PatFrag<(ops node:$ptr), (zextloadi8 node:$ptr), [{
+    return isGlobalLoad(dyn_cast<LoadSDNode>(N));
+}]>;
+
 class Constants {
 int TWO_PI = 0x40c90fdb;
 int PI = 0x40490fdb;
@@ -128,7 +136,7 @@ def SHADER_TYPE : AMDGPUShaderInst <
 
 class POW_Common <AMDGPUInst log_ieee, AMDGPUInst exp_ieee, AMDGPUInst mul,
                   RegisterClass rc> : Pat <
-  (int_AMDGPU_pow rc:$src0, rc:$src1),
+  (fpow rc:$src0, rc:$src1),
   (exp_ieee (mul rc:$src1, (log_ieee rc:$src0)))
 >;
 

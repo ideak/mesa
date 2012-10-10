@@ -140,6 +140,13 @@ brwCreateContext(int api,
       return false;
    }
 
+   /* brwInitVtbl needs to know the chipset generation so that it can set the
+    * right pointers.
+    */
+   brw->intel.gen = screen->gen;
+
+   brwInitVtbl( brw );
+
    brwInitDriverFunctions(screen, &functions);
 
    struct intel_context *intel = &brw->intel;
@@ -148,12 +155,9 @@ brwCreateContext(int api,
    if (!intelInitContext( intel, api, mesaVis, driContextPriv,
 			  sharedContextPrivate, &functions )) {
       printf("%s: failed to init intel context\n", __FUNCTION__);
-      free(brw);
       *error = __DRI_CTX_ERROR_NO_MEMORY;
       return false;
    }
-
-   brwInitVtbl( brw );
 
    brw_init_surface_formats(brw);
 
@@ -250,10 +254,10 @@ brwCreateContext(int api,
       MIN2(ctx->Const.VertexProgram.MaxNativeParameters,
 	   ctx->Const.VertexProgram.MaxEnvParams);
 
-   ctx->Const.FragmentProgram.MaxNativeInstructions = (16 * 1024);
-   ctx->Const.FragmentProgram.MaxNativeAluInstructions = (16 * 1024);
-   ctx->Const.FragmentProgram.MaxNativeTexInstructions = (16 * 1024);
-   ctx->Const.FragmentProgram.MaxNativeTexIndirections = (16 * 1024);
+   ctx->Const.FragmentProgram.MaxNativeInstructions = (1 * 1024);
+   ctx->Const.FragmentProgram.MaxNativeAluInstructions = (1 * 1024);
+   ctx->Const.FragmentProgram.MaxNativeTexInstructions = (1 * 1024);
+   ctx->Const.FragmentProgram.MaxNativeTexIndirections = (1 * 1024);
    ctx->Const.FragmentProgram.MaxNativeAttribs = 12;
    ctx->Const.FragmentProgram.MaxNativeTemps = 256;
    ctx->Const.FragmentProgram.MaxNativeAddressRegs = 0;

@@ -48,25 +48,6 @@
 #include <errno.h>
 #include <stdio.h>
 
-/*
-static ps_remap_inputs(
-	struct tgsi_llvm_context * tl_ctx,
-	unsigned tgsi_index,
-	unsigned tgsi_chan)
-{
-	:
-}
-
-struct si_input
-{
-	struct list_head head;
-	unsigned tgsi_index;
-	unsigned tgsi_chan;
-	unsigned order;
-};
-*/
-
-
 struct si_shader_context
 {
 	struct radeon_llvm_context radeon_bld;
@@ -215,10 +196,7 @@ static void declare_input_vs(
 	unsigned chan;
 
 	/* Load the T list */
-	/* XXX: Communicate with the rest of the driver about which SGPR the T#
-	 * list pointer is going to be stored in.  Hard code to SGPR[6:7] for
- 	 * now */
-	t_list_ptr = use_sgpr(base->gallivm, SGPR_CONST_PTR_V4I32, 6);
+	t_list_ptr = use_sgpr(base->gallivm, SGPR_CONST_PTR_V4I32, SI_SGPR_VERTEX_BUFFER);
 
 	t_offset = lp_build_const_int32(base->gallivm, input_index);
 
@@ -258,6 +236,7 @@ static void declare_input_fs(
 {
 	const char * intr_name;
 	unsigned chan;
+	struct si_shader *shader = &si_shader_ctx->shader->shader;
 	struct lp_build_context * base =
 				&si_shader_ctx->radeon_bld.soa.bld_base.base;
 	struct gallivm_state * gallivm = base->gallivm;
@@ -270,14 +249,8 @@ static void declare_input_fs(
 	 * [32:16] ParamOffset
 	 *
 	 */
-	/* XXX: This register number must be identical to the S_00B02C_USER_SGPR
-	 * register field value
-	 */
-	LLVMValueRef params = use_sgpr(base->gallivm, SGPR_I32, 6);
-
-
-	/* XXX: Is this the input_index? */
-	LLVMValueRef attr_number = lp_build_const_int32(gallivm, input_index);
+	LLVMValueRef params = use_sgpr(base->gallivm, SGPR_I32, SI_PS_NUM_USER_SGPR);
+	LLVMValueRef attr_number;
 
 	if (decl->Semantic.Name == TGSI_SEMANTIC_POSITION) {
 		for (chan = 0; chan < TGSI_NUM_CHANNELS; chan++) {
@@ -292,6 +265,10 @@ static void declare_input_fs(
 		}
 		return;
 	}
+
+	shader->input[input_index].param_offset = shader->ninterp++;
+	attr_number = lp_build_const_int32(gallivm,
+					   shader->input[input_index].param_offset);
 
 	/* XXX: Handle all possible interpolation modes */
 	switch (decl->Interp.Interpolate) {
@@ -392,9 +369,7 @@ static LLVMValueRef fetch_constant(
 		return bitcast(bld_base, type, load);
 	}
 
-	/* XXX: Assume the pointer to the constant buffer is being stored in
-	 * SGPR[0:1] */
-	const_ptr = use_sgpr(base->gallivm, SGPR_CONST_PTR_F32, 0);
+	const_ptr = use_sgpr(base->gallivm, SGPR_CONST_PTR_F32, SI_SGPR_CONST);
 
 	/* XXX: This assumes that the constant buffer is not packed, so
 	 * CONST[0].x will have an offset of 0 and CONST[1].x will have an
@@ -671,14 +646,14 @@ static void tex_fetch_args(
 							 0, LP_CHAN_ALL);
 
 	/* Resource */
-	ptr = use_sgpr(bld_base->base.gallivm, SGPR_CONST_PTR_V8I32, 4);
+	ptr = use_sgpr(bld_base->base.gallivm, SGPR_CONST_PTR_V8I32, SI_SGPR_RESOURCE);
 	offset = lp_build_const_int32(bld_base->base.gallivm,
 				  emit_data->inst->Src[1].Register.Index);
 	emit_data->args[2] = build_indexed_load(bld_base->base.gallivm,
 						ptr, offset);
 
 	/* Sampler */
-	ptr = use_sgpr(bld_base->base.gallivm, SGPR_CONST_PTR_V4I32, 2);
+	ptr = use_sgpr(bld_base->base.gallivm, SGPR_CONST_PTR_V4I32, SI_SGPR_SAMPLER);
 	offset = lp_build_const_int32(bld_base->base.gallivm,
 				  emit_data->inst->Src[1].Register.Index);
 	emit_data->args[3] = build_indexed_load(bld_base->base.gallivm,
@@ -722,6 +697,10 @@ int si_pipe_shader_create(
 	bool dump;
 
 	dump = debug_get_bool_option("RADEON_DUMP_SHADERS", FALSE);
+
+	assert(shader->shader.noutput == 0);
+	assert(shader->shader.ninterp == 0);
+	assert(shader->shader.ninput == 0);
 
 	memset(&si_shader_ctx, 0, sizeof(si_shader_ctx));
 	radeon_llvm_context_init(&si_shader_ctx.radeon_bld);
